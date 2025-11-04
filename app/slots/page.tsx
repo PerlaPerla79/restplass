@@ -3,9 +3,6 @@ export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 import SlotsClient, { TimeSlot } from './SlotsClient';
 import { supabaseAdmin } from '@/lib/supabase';
-
-export const dynamic = 'force-dynamic';
-
 export default async function SlotsPage() {
   const now = new Date();
   const to = new Date(now.getTime() + 6 * 60 * 60 * 1000);
