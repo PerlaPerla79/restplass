@@ -1,149 +1,112 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
-import { supabaseBrowser } from '@/lib/supabase';
+import { useEffect, useRef, useState } from 'react';
+import { supabase } from '@/lib/supabase';
 
-export type TimeSlot = {
-  id: number; // bigint hos deg
-  venue: string;
+type Slot = {
+  id: string;
   starts_at: string;
   ends_at: string;
-  seats_total: number;
-  seats_taken: number;
-  available: number;
+  seats: number;
+  status: 'open' | 'held' | 'booked' | string;
 };
 
-type Props = { initialSlots: TimeSlot[]; fromISO: string; toISO: string };
+export default function SlotsClient() {
+  const [slots, setSlots] = useState<Slot[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const subscribed = useRef(false);
 
-export default function SlotsClient({ initialSlots, fromISO, toISO }: Props) {
-  const [slots, setSlots] = useState<TimeSlot[]>(
-    [...initialSlots].sort((a, b) => +new Date(a.starts_at) - +new Date(b.starts_at))
-  );
-  const [rtStatus, setRtStatus] = useState('CONNECTING');
-  const [pendingId, setPendingId] = useState<number | null>(null);
-
-  const supabase = useMemo(() => supabaseBrowser(), []);
-
-  function inWindow(s: TimeSlot) {
-    const t = +new Date(s.starts_at);
-    return t >= +new Date(fromISO) && t <= +new Date(toISO);
-  }
-
+  // 1) Initial fetch
   useEffect(() => {
+    let isActive = true;
+
+    (async () => {
+      const { data, error } = await supabase
+        .from('time_slots')
+        .select('*')
+        .order('starts_at', { ascending: true });
+
+      if (!isActive) return;
+
+      if (error) {
+        setError(`Initial fetch error: ${error.message}`);
+        return;
+      }
+      setSlots(data ?? []);
+    })();
+
+    return () => {
+      isActive = false;
+    };
+  }, []);
+
+  // 2) Realtime subscription (kun én gang)
+  useEffect(() => {
+    if (subscribed.current) return;
+    subscribed.current = true;
+
     const channel = supabase
       .channel('time_slots-changes')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'time_slots' }, (payload) => {
-        console.log('Realtime endring:', payload);
-        setSlots((prev) => {
-          const { eventType, new: rowNew, old: rowOld } = payload as any;
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'time_slots' },
+        (payload) => {
+          setSlots((prev) => {
+            const next = [...prev];
 
-          if (eventType === 'INSERT') {
-            if (!inWindow(rowNew)) return prev;
-            const exists = prev.some((s) => s.id === rowNew.id);
-            const next = exists ? prev.map((s) => (s.id === rowNew.id ? rowNew : s)) : [...prev, rowNew];
-            return next.sort((a, b) => +new Date(a.starts_at) - +new Date(b.starts_at));
-          }
+            if (payload.eventType === 'INSERT') {
+              next.push(payload.new as Slot);
+              next.sort((a, b) => a.starts_at.localeCompare(b.starts_at));
+              return next;
+            }
 
-          if (eventType === 'UPDATE') {
-            if (!inWindow(rowNew)) return prev.filter((s) => s.id !== rowNew.id);
-            const next = prev.map((s) => (s.id === rowNew.id ? rowNew : s));
-            return next.sort((a, b) => +new Date(a.starts_at) - +new Date(b.starts_at));
-          }
+            if (payload.eventType === 'UPDATE') {
+              const idx = next.findIndex((r) => r.id === (payload.new as any).id);
+              if (idx !== -1) next[idx] = payload.new as Slot;
+              return next;
+            }
 
-          if (eventType === 'DELETE') {
-            const id = (rowOld?.id ?? rowNew?.id) as number | undefined;
-            return id ? prev.filter((s) => s.id !== id) : prev;
-          }
+            if (payload.eventType === 'DELETE') {
+              return next.filter((r) => r.id !== (payload.old as any).id);
+            }
 
-          return prev;
-        });
-      })
+            return next;
+          });
+        }
+      )
       .subscribe((status) => {
-        setRtStatus(status as string);
-        console.log('Realtime status:', status);
+        if (status === 'CHANNEL_ERROR') {
+          setError('Realtime: CHANNEL_ERROR (sjekk publikasjon/URL/anon key)');
+        } else if (status === 'TIMED_OUT') {
+          setError('Realtime: TIMED_OUT (nett/WS blokkert?)');
+        }
       });
 
     return () => {
-      supabase.removeChannel(channel);
+      channel.unsubscribe();
     };
-  }, [supabase, fromISO, toISO]);
+  }, []);
 
-  async function bookOne(id: number) {
-    try {
-      setPendingId(id);
-      const res = await fetch('/api/book', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id }),
-      });
-      const body = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        alert(body?.error ?? 'Noe gikk galt ved booking.');
-      }
-      // Ingen manuell state-oppdatering her — Realtime vil pushe endringen
-    } catch (e) {
-      alert('Nettverksfeil ved booking.');
-    } finally {
-      setPendingId(null);
-    }
+  if (error) {
+    return <div className="p-4 text-red-600">{error}</div>;
   }
 
   return (
-    <div style={{ paddingTop: 8 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 12 }}>
-        <h2 style={{ margin: 0 }}>Ledige bord – neste 6 timer</h2>
-        <small>
-          Realtime: <code>{rtStatus}</code>
-        </small>
-      </div>
-
+    <div className="p-4 space-y-3">
       {slots.length === 0 ? (
-        <p>Ingen ledige bord i tidsrommet.</p>
+        <div>Ingen ledige bord akkurat nå.</div>
       ) : (
-        <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
-          {slots.map((s) => {
-            const available = s.available; // felt fra DB
-            const disabled = available <= 0 || pendingId === s.id;
-
-            return (
-              <li key={s.id} style={{ padding: '10px 0', borderTop: '1px solid #ddd' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'center' }}>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontWeight: 600 }}>{s.venue}</div>
-                    <div style={{ fontSize: 12, color: '#666' }}>
-                      {new Date(s.starts_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}–{' '}
-                      {new Date(s.ends_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                    </div>
-                  </div>
-
-                  <div style={{ textAlign: 'right', marginRight: 8 }}>
-                    <div>
-                      ledige: <strong>{available}</strong>
-                    </div>
-                    <div style={{ fontSize: 12, color: '#666' }}>
-                      {s.seats_taken}/{s.seats_total} opptatt
-                    </div>
-                  </div>
-
-                  <button
-                    onClick={() => bookOne(s.id)}
-                    disabled={disabled}
-                    style={{
-                      padding: '6px 10px',
-                      borderRadius: 8,
-                      border: '1px solid #ccc',
-                      background: disabled ? '#eee' : '#f5f5f5',
-                      cursor: disabled ? 'not-allowed' : 'pointer',
-                      minWidth: 120,
-                    }}
-                    aria-disabled={disabled}
-                  >
-                    {pendingId === s.id ? 'Booker…' : 'Book 1 sete'}
-                  </button>
-                </div>
-              </li>
-            );
-          })}
+        <ul className="space-y-2">
+          {slots.map((s) => (
+            <li key={s.id} className="rounded-xl border p-3">
+              <div className="font-medium">
+                {new Date(s.starts_at).toLocaleString()} — {new Date(s.ends_at).toLocaleString()}
+              </div>
+              <div className="text-sm opacity-80">
+                {s.seats} plasser • status: {s.status}
+              </div>
+            </li>
+          ))}
         </ul>
       )}
     </div>

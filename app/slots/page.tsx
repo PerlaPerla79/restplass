@@ -1,34 +1,12 @@
-export const runtime = 'nodejs';
-export const dynamic = 'force-dynamic';
+import SlotsClient from './SlotsClient';
+
 export const revalidate = 0;
-import SlotsClient, { TimeSlot } from './SlotsClient';
-import { supabaseAdmin } from '@/lib/supabase';
-export default async function SlotsPage() {
-  const now = new Date();
-  const to = new Date(now.getTime() + 6 * 60 * 60 * 1000);
-  const fromISO = now.toISOString();
-  const toISO = to.toISOString();
 
-  const supabase = supabaseAdmin();
-  const { data, error } = await supabase
-    .from('time_slots')
-    .select('id, venue, starts_at, ends_at, seats_total, seats_taken, available')
-    .gte('starts_at', fromISO)
-    .lte('starts_at', toISO)
-    .order('starts_at', { ascending: true });
-
-  if (error) {
-    return (
-      <main style={{ padding: 24 }}>
-        <h1>Ledige bord – neste 6 timer</h1>
-        <p style={{ color: 'crimson' }}>Feil ved henting av slots: {error.message}</p>
-      </main>
-    );
-  }
-
+export default function Page() {
   return (
-    <main style={{ padding: 24 }}>
-      <SlotsClient initialSlots={(data ?? []) as TimeSlot[]} fromISO={fromISO} toISO={toISO} />
+    <main className="p-6">
+<h1 className="text-3xl font-bold mb-4">Ledige bord – neste 6 timer · v-test-1</h1>
+      <SlotsClient />
     </main>
   );
 }
